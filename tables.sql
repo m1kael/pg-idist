@@ -1,6 +1,12 @@
 
-drop table if exists info, data, refs, index cascade;
+-- drop entire schema, which will cascade through functions too
+DROP SCHEMA if exists idist CASCADE;
+CREATE SCHEMA idist;
 
+--points to our schema so we don't have to qualify everything with it
+SET search_path TO idist;
+
+-- old: drop table if exists info, data, refs, index cascade;
 
 CREATE TABLE IF NOT EXISTS info (
     id  serial,
