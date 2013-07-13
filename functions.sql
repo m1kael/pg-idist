@@ -1,24 +1,44 @@
 
 -- returns the value column from the matching unique key query
-CREATE OR REPLACE FUNCTION get_info(key_in varchar) RETURNS text AS $$
+CREATE OR REPLACE FUNCTION InfoGet(key_in varchar) RETURNS text AS $$
 DECLARE
-    temp RECORD;
+    --temp RECORD;
+    val_out varchar = NULL;
 BEGIN
-    SELECT * FROM info WHERE info.key like key_in INTO temp;
+    select val from info where info.key = key_in into val_out;
+    if not found then
+        raise notice 'no entry found for key %', key_in;
+    end if;
+    --SELECT * FROM info WHERE info.key like key_in INTO temp;
 --    EXECUTE 'SELECT * FROM info WHERE info.key like $1' INTO temp USING key;
 --    EXECUTE 'SELECT * FROM tt WHERE tt.id = $1' INTO rec USING x;
 
-    RETURN temp.val;
+    --RETURN temp.val;
+    
+    raise notice 'val_out = %', val_out;
+    
+    return val_out;
 END;
 $$ LANGUAGE plpgsql;
 
 
 
 -- sets the value column given a key val pair
-CREATE OR REPLACE FUNCTION set_info(key_in varchar, val_in varchar) RETURNS integer AS $$
+CREATE OR REPLACE FUNCTION InfoSet(key_in varchar, val_in varchar) RETURNS void AS $$
 DECLARE
-    id_out int := -1;
+    --id_out int := -1;
+    cur_val varchar := '';
 BEGIN
+    select val from info where info.key = key_in into cur_val;
+    if found then
+        raise notice 'key % already exists with value %', key_in, cur_val;
+        update info set val = val_in where key = key_in;
+    else
+        insert into info(key, val) values (key_in, val_in);
+    end if;
+        
+    
+/*
     INSERT INTO info (key, val) VALUES (key_in, val_in) RETURNING id into id_out;
     IF FOUND THEN
         RAISE NOTICE '    Value inserted!';
@@ -26,6 +46,24 @@ BEGIN
         RAISE NOTICE '    Value not inserted!';
     END IF;
     RETURN id_out;
+*/
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+
+--------------------------------------------------------------------------
+
+
+CREATE OR REPLACE FUNCTION Test() RETURNS void AS $$
+DECLARE
+
+BEGIN
+
+    execute 'truncate table info';
+    execute Test_InsertData();
+    execute Test_InsertRefs();
     
 END;
 $$ LANGUAGE plpgsql;
@@ -33,19 +71,44 @@ $$ LANGUAGE plpgsql;
 
 
 
--- populates half-points in reference table
-CREATE OR REPLACE FUNCTION test_refs() RETURNS void AS $$
+-- populates half-points in reference table for explicit 2D case
+CREATE OR REPLACE FUNCTION Test_InsertRefs() RETURNS void AS $$
+DECLARE
+    points real[][];
+    pt real[];
+    i integer;
+    tmpVal varchar;
 BEGIN
+    points := '{{0.0, 0.5}, {0.5, 0.0}, {1.0, 0.5}, {0.5, 1.0}}';
+    select array_length(points, 1) into tmpVal;
+    
+    RAISE NOTICE 'Inserting test ref points = %', points;
+    RAISE NOTICE 'num refs = %', tmpVal;
+    --RAISE NOTICE 'num dims = %', array_length(points, 2);
+    -- better make sure dims match in future
+    
+    --set this info for later
+    perform InfoSet('num_refs', tmpVal);
+    
+    -- using manual counter for ID values
+    i := 0;
+    FOREACH pt SLICE 1 IN ARRAY points LOOP
+        RAISE NOTICE 'ref[%] = %', i, pt;
+        INSERT into refs (id, dims) VALUES (i, pt);
+        i := i + 1;
+    END LOOP;
+    
+    /*
+    -- manual inserts
     EXECUTE 'insert into refs (id, dims) VALUES (0, ARRAY[0.0,0.5])';
     EXECUTE 'insert into refs (id, dims) VALUES (1, ARRAY[0.5,0.0])';
     EXECUTE 'insert into refs (id, dims) VALUES (2, ARRAY[1.0,0.5])';
     EXECUTE 'insert into refs (id, dims) VALUES (3, ARRAY[0.5,1.0])';
-    
---    EXECUTE 'SELECT * FROM info WHERE info.key like $1' INTO temp USING key;
---    EXECUTE 'SELECT * FROM tt WHERE tt.id = $1' INTO rec USING x;
-
+    */  
 END;
 $$ LANGUAGE plpgsql;
+
+
 
 /*
 
@@ -75,7 +138,8 @@ $$ LANGUAGE plpgsql;
 */
 
 
-/*
+/* Test 2D dataset from existing idistance codebase
+
 0, 0.0, 0.8
 1, 0.475, 0.5
 2, 0.3, 0.35
@@ -86,49 +150,97 @@ $$ LANGUAGE plpgsql;
 7, 0.4, 0.65
 8, 0.4, 0.8
 9, 0.6, 0.8
+
 */
 
 -- populates test data
-CREATE OR REPLACE FUNCTION test_data() RETURNS void AS $$
+CREATE OR REPLACE FUNCTION Test_InsertData() RETURNS void AS $$
 DECLARE
     points real[][];
     pt real[];
     i integer;
+    tmpVal varchar;
 BEGIN
     points := '{{0.0, 0.8}, {0.475, 0.5}, {0.3, 0.35}, {0.4, 0.2}, {0.5, 0.05}, {0.8, 0.1}, {0.8, 0.6}, {0.4, 0.65}, {0.4, 0.8}, {0.6, 0.8}}';
     
+    select array_length(points, 1) into tmpVal;
+    execute InfoSet('num_points', tmpVal);
+    select array_length(points, 2) into tmpVal;
+    execute InfoSet('num_dims', tmpVal);
+    
+    RAISE NOTICE 'Inserting test data points = %', points;
+    RAISE NOTICE 'num pts = %', array_length(points, 1);
+    RAISE NOTICE 'num dims = %', array_length(points, 2);
+    
+    
+    -- using manual counter for ID values
+    -- might want to change this later if data already has explicit IDs
+    i := 0;
+    FOREACH pt SLICE 1 IN ARRAY points LOOP
+        RAISE NOTICE 'point[%] = %', i, pt;
+        INSERT into data (id, dims) VALUES (i, pt);
+        i := i + 1;
+    END LOOP;
+    
+    /*
+    -- playing around
     RAISE NOTICE 'points = %', points;
     RAISE NOTICE 'array dims of points = %', array_dims(points);
-    RAISE NOTICE 'points[1][1:2] = %', points[1][1:2];
-    RAISE NOTICE 'points[1][1:2] = %', (points[1:1][1:2]);
-    RAISE NOTICE 'points[1:10][1:1] = %', (points[1:10][1:1]);
     
-    pt := points[1:1][1:2];
+    RAISE NOTICE 'points[1][1] = %', points[1][1];
+    RAISE NOTICE 'points[1] = %', points[1];
+    RAISE NOTICE 'points[1][1:2] = %', points[1][1:2];
+    */
+    
+    
+    /*
+    -- first try (still a 2D array index, which is screwy...)
+    -- but makes for significantly cleaner insert code
+    RAISE NOTICE 'points[1:1] = %', points[1:1];
+    select points[1:1] into pt;
     RAISE NOTICE 'pt = %', pt;
     RAISE NOTICE 'array dims of pt = %', array_dims(pt);
     RAISE NOTICE 'pt = % , %', pt[1][1], pt[1][2];
     
+    -- then to insert the only way i found was slicing to get 1D arrays out
+    -- but that meant i had to keep an explicit loop variable too, wasteful!
     i := 0;
     FOREACH pt SLICE 1 IN ARRAY points LOOP
         INSERT into data (id, dims) VALUES (i, pt);
         i := i + 1;
     END LOOP;
+    */
+    
     
     
     /*
-        
-    FOR i in 1..(array_length(points,1)) LOOP
-        RAISE NOTICE 'points[i] = %', points[i];
-        INSERT into data (id, dims) VALUES (i, points[i]);
-    END LOOP;
+    -- second try, found the right way to get 1D array
+    RAISE NOTICE 'points[1:1] = %', ARRAY(SELECT unnest(points[1:1]));
+    -- unpacks the 2D array into single values, then take them all and
+    -- pack them back up as a new array (which is now 1D)
+    select ARRAY(SELECT unnest(points[1:1])) into pt;
+    RAISE NOTICE 'pt = %', pt;
+    RAISE NOTICE 'array dims of pt = %', array_dims(pt);
+    RAISE NOTICE 'pt = % , %', pt[1], pt[2];
     
+    
+    --now just a regular loop to insert
+    --but messy indexing inside
+    RAISE NOTICE 'num pts = %', array_length(points, 1);
+    RAISE NOTICE 'num dims = %', array_length(points, 2);
+    
+    FOR i in 1..(array_length(points,1)) LOOP
+        select ARRAY(SELECT unnest(points[i:i])) into pt;
+        RAISE NOTICE 'points[i] = %', pt;
+        INSERT into data (id, dims) VALUES (i, pt);
+    END LOOP;
     */
+    
+    --very first attempt
     --EXECUTE 'insert into data (id, dims) VALUES (1, ARRAY[0.3,0.1])';
     --EXECUTE 'insert into data (id, dims) VALUES (2, ARRAY[0.8,0.4])';
     --EXECUTE 'insert into data (id, dims) VALUES (3, ARRAY[0.2,0.9])';
     
---    EXECUTE 'SELECT * FROM info WHERE info.key like $1' INTO temp USING key;
---    EXECUTE 'SELECT * FROM tt WHERE tt.id = $1' INTO rec USING x;
 
 END;
 $$ LANGUAGE plpgsql;
@@ -194,7 +306,7 @@ $$ LANGUAGE plpgsql;
 
 
 -- cycle through data and refs building index
-CREATE  OR REPLACE FUNCTION build_index() RETURNS void AS $$
+CREATE OR REPLACE FUNCTION BuildIndex() RETURNS void AS $$
 DECLARE
   r refs%rowtype;
   p data%rowtype;
@@ -239,6 +351,10 @@ BEGIN
     SELECT array_length(ids, 1) INTO nrefs;
     RAISE NOTICE 'ids length = %', array_length(ids, 1);
     RAISE NOTICE 'dims length = %', array_length(dims, 1);
+    RAISE NOTICE 'dims2 length = %', array_length(dims, 2);
+    
+    
+    EXIT;
     
     FOR p in SELECT * FROM data LOOP
     

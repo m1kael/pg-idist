@@ -1,9 +1,10 @@
 
+drop table if exists info, data, refs, index cascade;
 
 
 CREATE TABLE IF NOT EXISTS info (
     id  serial,
-    key  varchar(255),
+    key  varchar(255) unique,
     val  varchar(255)
 );
 
@@ -24,4 +25,3 @@ CREATE TABLE IF NOT EXISTS index (
     id  int,
     val real
 );
-
