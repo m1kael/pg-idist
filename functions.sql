@@ -1,5 +1,7 @@
 
-
+-----------------------------------------------------------------------
+-- HELPER FUNCTIONS
+-----------------------------------------------------------------------
 
 -- returns the value column from the matching unique key query
 CREATE OR REPLACE FUNCTION InfoGet(key_in varchar) RETURNS text AS $$
@@ -9,16 +11,15 @@ DECLARE
 BEGIN
     select val from info where info.key = key_in into val_out;
     if not found then
-        raise notice 'no entry found for key %', key_in;
+        raise exception 'no entry found for key %', key_in;
     end if;
+    
     --SELECT * FROM info WHERE info.key like key_in INTO temp;
 --    EXECUTE 'SELECT * FROM info WHERE info.key like $1' INTO temp USING key;
 --    EXECUTE 'SELECT * FROM tt WHERE tt.id = $1' INTO rec USING x;
-
     --RETURN temp.val;
     
-    raise notice 'val_out = %', val_out;
-    
+    --raise notice 'val_out = %', val_out;
     return val_out;
 END;
 $$ LANGUAGE plpgsql;
@@ -53,10 +54,31 @@ END;
 $$ LANGUAGE plpgsql;
 
 
+-- calculates the constant spacing separator value for partitions
+-- automatically does this using an upper bound approximation
+CREATE OR REPLACE FUNCTION CalculateC() RETURNS real AS $$
+DECLARE
+    e real := 0.0; --not needed right now, but maybe later    
+    d int; -- number dims
+    val real := 0.0;
+BEGIN
 
+    select InfoGet('num_dims') into d;
+    
+    val := (2 * e) + 1; -- max distance in one dimension
+    val := sqrt(val * d); -- over all dimensions
+    val := (val * 1.2) + 0.51; -- then just buffer it for assurance
+    val := round(val); -- we rounded to an int, but not necessary
+    
+    raise notice 'c = %', val;
+    return val;
+    
+END;
+$$ LANGUAGE plpgsql;
 
---------------------------------------------------------------------------
-
+-----------------------------------------------------------------------
+-- TEST FUNCTIONS
+-----------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION Test() RETURNS void AS $$
 DECLARE
@@ -66,6 +88,9 @@ BEGIN
     execute 'truncate table info';
     execute Test_InsertData();
     execute Test_InsertRefs();
+    execute InitOptions();
+    execute BuildIndex();
+    execute Test_IndexGet();
     
 END;
 $$ LANGUAGE plpgsql;
@@ -264,37 +289,43 @@ END;
 $$ LANGUAGE plpgsql;
 
 
--- automatically calculate constant c separator between partitions
--- given data dimensionality and normal unit-space
+
+CREATE OR REPLACE FUNCTION SeeAll() RETURNS void AS $$
+DECLARE
+    tmp RECORD;
+BEGIN
+
+    raise notice '----- INFO TABLE -----';
+    
+    FOR tmp in SELECT * FROM info LOOP
+        raise notice '%', tmp;
+    END LOOP;
+    
+    raise notice '----- REFS TABLE -----';
+    
+    FOR tmp in SELECT * FROM refs LOOP
+        raise notice '%', tmp;
+    END LOOP;
+    
+    raise notice '----- DATA TABLE -----';
+    
+    FOR tmp in SELECT * FROM data LOOP
+        raise notice '%', tmp;
+    END LOOP;
+    
+    raise notice '----- INDEX TABLE -----';
+    
+    FOR tmp in SELECT * FROM index LOOP
+        raise notice '%', tmp;
+    END LOOP;
+    
+END;
+$$ LANGUAGE plpgsql;
+
 
 /*
-
-  //added so we can dynamically set c based on what config file refs-dist is
-  //space given extra e (default is e=0, no affect)
-  double edist = (2 * e) + 1;
-  
-  //since each dim is max length of 1
-  //multiply by 2 for safety 
-  double diag = 2 * sqrt( (edist * d));
-  
-  //old
-//  double diag = sqrt(d);
-  
-  //added ONLY for Tim's EM algorithm 4/25/2012
-  //diag = diag * 3;
-  
-
-  //round up
-  int c = (int)(diag + 0.5);
-
-  //cout << "calculate c given d= " << d << ", e = " << e << " ; c = " << c << endl;
-  
-*/
-
-
-
 -- return all reference points as a set of records from the ref table
-CREATE  OR REPLACE FUNCTION collect_refs() RETURNS SETOF refs AS $$
+CREATE OR REPLACE FUNCTION collect_refs() RETURNS SETOF refs AS $$
 DECLARE
   r refs%rowtype;
 BEGIN
@@ -305,115 +336,186 @@ BEGIN
     RETURN;
 END;
 $$ LANGUAGE plpgsql;
+*/
+
+
+-- simple wrapper for any initializations required prior to index building
+CREATE OR REPLACE FUNCTION InitOptions() RETURNS void AS $$
+DECLARE
+    c_val_str varchar;
+BEGIN
+    
+    select CalculateC() into c_val_str;
+    execute InfoSet('c_val', c_val_str);
+    
+END;
+$$ LANGUAGE plpgsql;
+
 
 
 -- cycle through data and refs building index
 CREATE OR REPLACE FUNCTION BuildIndex() RETURNS void AS $$
 DECLARE
-  r refs%rowtype;
-  p data%rowtype;
-  ids integer[];
-  dims real[];
-  counter integer := 0;
-  nrefs integer;
-  dist real := 0;
-  ref real[];
-  curdist real := 0;
-  curid integer := -1;
-  const_c real;
-  index_y real;
-  old_distmax real;
-  
+
+    --global vars to retrieve
+    num_refs integer;
+    num_dims integer;
+    c_val real := 0.0;
+    
+    --vars for indexing
+        -- refs and points
+    r refs%rowtype;
+    p data%rowtype;
+    counter integer;
+    ref_ids integer[];
+    ref_dims real[];
+        --vars for assignment
+    dist real := 0; 
+    ref real[];
+    curdist real; 
+    curid integer;
+    old_distmax real;
+    index_y real;
+    
+    dbg boolean := TRUE;
+    
 BEGIN
 
-    const_c := get_info('constant_c');
-    RAISE NOTICE 'const_c = %', const_c;
+    -- we need this for calculating index value later
+    num_refs := InfoGet('num_refs');
+    num_dims := InfoGet('num_dims');
+    c_val := InfoGet('c_val');
     
+    if c_val = 0.0 then
+        raise exception 'Invalid c value!';
+    end if;
+    
+    if dbg = TRUE then
+        raise notice 'c_val = %', c_val;
+    end if;
+    
+    -- collect refs in memory for speed and convenience
+    counter := 0;
     FOR r in SELECT * FROM refs
     LOOP
-        RAISE NOTICE 'counter = %', counter;
-        IF counter = 0 THEN
-            dims := ARRAY[r.dims];
-            ids := ARRAY[r.id];
+        --RAISE NOTICE 'counter = %', counter;
+        IF counter = 0 THEN --need to initialize array first time
+            ref_ids := ARRAY[r.id];
+            ref_dims := ARRAY[r.dims];
         ELSE
-            ids := ids || r.id;
-            dims := dims || r.dims;
+            ref_ids := ref_ids || r.id;
+            ref_dims := ref_dims || r.dims;
         END IF;
         counter := counter + 1;
     END LOOP;
     
-    RAISE NOTICE 'ids = %', ids;
-    RAISE NOTICE 'dims = %', dims;
+    /*
+    RAISE NOTICE 'ids = %', ref_ids;
+    RAISE NOTICE 'dims = %', ref_dims;
+    RAISE NOTICE 'array dims = %', array_dims(ref_dims);
     
-    RAISE NOTICE 'array dims = %', array_dims(dims);
-    RAISE NOTICE 'dims = %', dims[1:4][1:2];
-    RAISE NOTICE 'dims = %', dims[2:2][1:2];
+    RAISE NOTICE 'ids length = %', array_length(ref_ids, 1);
+    RAISE NOTICE 'dims length = %', array_length(ref_dims, 1);
+    RAISE NOTICE 'dims2 length = %', array_length(ref_dims, 2);
+    */
     
-    RAISE NOTICE 'counter = %', counter;
-    SELECT array_length(ids, 1) INTO nrefs;
-    RAISE NOTICE 'ids length = %', array_length(ids, 1);
-    RAISE NOTICE 'dims length = %', array_length(dims, 1);
-    RAISE NOTICE 'dims2 length = %', array_length(dims, 2);
+    -- assure things working correctly
+    if array_length(ref_dims, 1) <> num_refs then
+        raise exception 'Incorrect number of reference points!';
+    end if;
     
     
-    EXIT;
+    for p in select * from data loop
     
-    FOR p in SELECT * FROM data LOOP
-    
-        RAISE NOTICE 'point p has id % with dims: %', p.id, p.dims;
+        if dbg = TRUE then
+            RAISE NOTICE 'point p has id % with dims: %', p.id, p.dims;
+        end if;
         
-        counter := 1;
-        FOREACH ref SLICE 1 IN ARRAY dims
+        curdist := 0.0;
+        curid := -1;
+        counter := 1; -- fyi, one-based indexing
+        FOREACH ref SLICE 1 IN ARRAY ref_dims
         LOOP
             RAISE NOTICE 'row = %', ref;
             dist := distance(ref, p.dims);
             RAISE NOTICE '    distance = %', dist;
             IF dist < curdist OR curid = -1 THEN
-                curid := ids[counter];
+                curid := ref_ids[counter];
                 curdist := dist;
             END IF;
             counter := counter + 1;
         END LOOP;
         
-        RAISE NOTICE '    closest ref % with dist %', curid, curdist;
+        if dbg = TRUE then
+            RAISE NOTICE '    closest ref % with dist %', curid, curdist;
+        end if;
         
-        --update point partition id
-        
+        --update point partition id (convenience knowledge)
         UPDATE data SET pid = curid WHERE id = p.id;
         
-        --calculate index value
-        index_y := (curid * const_c) + curdist;
-        RAISE NOTICE '    index value => %', index_y;
-        
         --check partition distmaxes
-        
         SELECT refs.distmax FROM refs WHERE refs.id = curid INTO old_distmax;
         
         RAISE NOTICE '    old distmax = %', old_distmax;
         
         IF old_distmax < curdist OR old_distmax IS NULL THEN
-            RAISE NOTICE 'replacing distmax';
+            if dbg = TRUE then
+                RAISE NOTICE '      replacing distmax!';
+            end if;
             UPDATE refs SET distmax = curdist, distmaxid = p.id WHERE id = curid;
             
         END IF;
         
+        --calculate index value
+        index_y := (curid * c_val) + curdist;
+        RAISE NOTICE '    index value => %', index_y;
         
-        
-        
-    /*
-        FOR i in 1..nrefs LOOP
-            RAISE NOTICE 'ref % is id % with dims: %', i, ids[i], dims[1:2];
-            
-            dist := distance(dims[i:i][1:2], p.dims);
-            RAISE NOTICE '    distance = %', dist;
-          
-        END LOOP;
-    */ 
+        insert into index(id, val) VALUES (p.id, index_y);
     
-    END LOOP;
+    end loop;
     
 
+END;
+$$ LANGUAGE plpgsql;
+
+
+--uses RETURN NEXT to iteratively (row by row) build up the result set
+CREATE OR REPLACE FUNCTION Test_IndexGet() RETURNS 
+TABLE(id int, dims real[], val real) AS $$
+DECLARE
+
+BEGIN
+    return query select data.id, data.dims, index.val from index inner join data on index.id = data.id where index.val between 0.0 and 2.0;
     
 END;
 $$ LANGUAGE plpgsql;
 
+/*
+--uses RETURN NEXT to iteratively (row by row) build up the result set
+CREATE OR REPLACE FUNCTION Test_IndexGet() RETURNS SETOF record AS $$
+DECLARE
+    r record;
+BEGIN
+    FOR r IN SELECT * FROM index LOOP
+        -- can do some processing here
+        RETURN NEXT r; -- return current row of SELECT
+    END LOOP;
+    RETURN;
+    
+END;
+$$ LANGUAGE plpgsql;
+*/
+
+
+-- cycle through data and refs building index
+CREATE OR REPLACE FUNCTION QueryIndex() RETURNS void AS $$
+DECLARE
+BEGIN
+
+--select data.id, data.dims, index.val from index inner join data on index.id = data.id where index.val between 0.0 and 2.0;
+
+
+    
+
+END;
+$$ LANGUAGE plpgsql;
