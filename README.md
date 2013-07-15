@@ -15,7 +15,7 @@ Quick Instructions
     \i tables.sql
     \i functions.sql
 6.  Execute the following command:
-    select Test(); 
+    select * from Test(); 
 
 
 Basics

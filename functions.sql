@@ -86,11 +86,22 @@ DECLARE
 BEGIN
 
     execute 'truncate table info';
+    execute 'truncate table data';
+    execute 'truncate table refs';
+    execute 'truncate table index';
+    
+    raise notice 'INSERTING DATA';
     execute Test_InsertData();
+    raise notice 'CREATING REFS';
     execute Test_InsertRefs();
+    raise notice 'INIT OPTIONS';
     execute InitOptions();
+    raise notice 'BUILD INDEX';
     execute BuildIndex();
+    raise notice 'KNN RETRIEVAL';
     execute Test_IndexGet();
+    raise notice 'CURSOR USAGE';
+    execute Test_Cursor();
     
 END;
 $$ LANGUAGE plpgsql;
@@ -343,10 +354,18 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION InitOptions() RETURNS void AS $$
 DECLARE
     c_val_str varchar;
+    r_init_str varchar := '0.05';
+    r_delt_str varchar := '0.05';
+    
 BEGIN
     
     select CalculateC() into c_val_str;
     execute InfoSet('c_val', c_val_str);
+    
+    execute InfoSet('r_init', r_init_str);
+    execute InfoSet('r_delt', r_delt_str);
+    
+    
     
 END;
 $$ LANGUAGE plpgsql;
@@ -467,7 +486,9 @@ BEGIN
         END IF;
         
         --calculate index value
-        index_y := (curid * c_val) + curdist;
+        index_y := CalculateY(curid, c_val, curdist);
+        
+        --index_y := (curid * c_val) + curdist;
         RAISE NOTICE '    index value => %', index_y;
         
         insert into index(id, val) VALUES (p.id, index_y);
@@ -479,18 +500,75 @@ END;
 $$ LANGUAGE plpgsql;
 
 
---uses RETURN NEXT to iteratively (row by row) build up the result set
-CREATE OR REPLACE FUNCTION Test_IndexGet() RETURNS 
-TABLE(id int, dims real[], val real) AS $$
-DECLARE
 
+CREATE OR REPLACE FUNCTION CalculateY(i real, c real, d real) RETURNS real AS $$
+BEGIN 
+    return ((i * c) + d);
+END;
+$$ LANGUAGE plpgsql;
+
+
+--uses RETURN NEXT to iteratively (row by row) build up the result set
+--use with "select * from Test_IndexGet();"
+CREATE OR REPLACE FUNCTION Test_IndexGet() RETURNS void AS $$
+DECLARE
+    q real[];
+    k int;
 BEGIN
-    return query select data.id, data.dims, index.val from index inner join data on index.id = data.id where index.val between 0.0 and 2.0;
+    q := '{0.0, 0.0}';
+    k := 10;
+    perform QueryKNN(q, k);
+    
+--    return query select data.id, data.dims, index.val from index inner join data on index.id = data.id where index.val between 0.0 and 2.0;
     
 END;
 $$ LANGUAGE plpgsql;
 
+
+CREATE OR REPLACE FUNCTION Test_Cursor() RETURNS void AS $$
+DECLARE
+    ref refcursor;
+    pt RECORD;    
+BEGIN
+
+    -- both methods here seem to work equally
+    ref := Test_CursorGet();
+    --select * from Test_Cursor() into ref;
+    
+    loop  --infinite loop, requires reaching end of data in cursor (always happens)
+        
+        fetch ref into pt;
+        if not FOUND then
+            raise notice 'terminating ref null = %', (ref is null);
+            raise notice 'terminating pt null = %', (pt is null);
+            raise notice 'pt = %', pt;
+            EXIT; --exits loop
+        end if;
+        
+        raise notice 'pt = %', pt;
+
+    end loop;
+    
+    
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+CREATE OR REPLACE FUNCTION Test_CursorGet() RETURNS refcursor AS $$
+DECLARE
+    ref refcursor;
+BEGIN
+    open ref for select data.id, data.dims, index.val from index inner join data on index.id = data.id where index.val >= 0.0 order by index.val;
+    return ref;
+    
+END;
+$$ LANGUAGE plpgsql;
+
+
+
 /*
+this doesn't work, not sure why yet..
 --uses RETURN NEXT to iteratively (row by row) build up the result set
 CREATE OR REPLACE FUNCTION Test_IndexGet() RETURNS SETOF record AS $$
 DECLARE
@@ -507,15 +585,149 @@ $$ LANGUAGE plpgsql;
 */
 
 
--- cycle through data and refs building index
-CREATE OR REPLACE FUNCTION QueryIndex() RETURNS void AS $$
+--perform a knn query on the table-based index
+--return $k nearest neighbors from query point $q 
+CREATE OR REPLACE FUNCTION QueryKNN(q real[], k int, OUT knn_ids int[]) AS $$
 DECLARE
+    
+    r_init real := 0.0;
+    r_delt real := 0.0;
+    r real;
+    dist real;
+    
+    pt data%ROWTYPE;
+    done boolean;
+    knn_count int;
+
 BEGIN
 
---select data.id, data.dims, index.val from index inner join data on index.id = data.id where index.val between 0.0 and 2.0;
-
-
+    raise notice 'query q = %', q;
+    raise notice '  with kNN where k = %', k;
     
+    
+    r_init := InfoGet('r_init');
+    r_delt := InfoGet('r_delt');
+    if r_init = 0.0 or r_delt = 0.0 then
+        raise exception 'Invalid r values!';
+    end if;
+    
+    done := false;
+    r := r_init;
+    knn_ids := '{}';
+    knn_count := 0;
+    
+    --raise notice 'knn_ids = %', knn_ids;
+    --raise notice 'knn_ids type = %', array_dims(knn_ids);
+    
+    while not done loop
+
+        for pt in select * from QuerySphere(q, r) loop
+            raise notice 'pt = %', pt;
+            
+            dist := distance(q,pt.dims);
+            if dist <= r then
+                knn_ids := knn_ids || pt.id;
+                knn_count := knn_count + 1;
+            end if;
+        end loop;
+        
+        raise notice 'knn size = %', array_length(knn_ids,1);
+        
+        -- for now, if we dont have them all we have to start over
+        if knn_count < k then
+            r := r + r_delt;
+            knn_ids := '{}';
+            knn_count := 0;
+        else
+            done := true;
+        end if;
+            
+    end loop;
+    
+    raise notice 'knn_ids = %', knn_ids;
+    
+    return;
 
 END;
 $$ LANGUAGE plpgsql;
+
+
+CREATE OR REPLACE FUNCTION QuerySphere(q real[], r real) RETURNS SETOF data AS $$
+DECLARE
+    dist real;
+    i int;
+    ref refs%rowtype;
+    pt data%rowtype;
+    q_index real;
+    p_min real;
+    p_max real;
+    c_val real := 0.0;
+    
+BEGIN
+
+    raise notice 'query sphere at %  (+/- %)', q, r;
+    
+    c_val := InfoGet('c_val');
+    if c_val = 0.0 then
+        raise exception 'Invalid c value!';
+    end if;
+    
+    
+    i := 0;
+    for ref in select * from refs loop
+        dist := distance(q, ref.dims);
+        raise notice 'ref % : % with dist = %', i, ref.dims, dist;
+        
+        if (dist - r) <= ref.distmax then
+            raise notice '  overlap!';
+          
+            q_index := CalculateY(ref.id, c_val, dist);
+            
+            if dist <= ref.distmax then
+                -- inside, so search 'in and out' from q
+                raise notice '    inside!';
+                p_min := dist - r;
+                if p_min < 0.0 then
+                    p_min := 0.0;
+                end if;
+                p_max := dist + r;
+                if p_max > ref.distmax then
+                    p_max := ref.distmax;
+                end if;
+                p_min := CalculateY(ref.id, c_val, p_min);
+                p_max := CalculateY(ref.id, c_val, p_max);
+                
+                raise notice '  p_min, p_max = %, %', p_min, p_max;
+                
+                return query select * from data where data.id in (select index.id from index where index.val between p_min AND p_max);
+                
+--                return query select data.id, data.dims from data inner join index on data.id = index.id where index.val between 
+                
+            else
+                -- intersects, so we search 'inward' from the partition edge
+                raise notice '    intersect!';
+                
+                p_min := q_index - r;
+                if p_min < 0.0 then
+                    p_min := 0.0;
+                end if;
+                
+                p_max := CalculateY(ref.id, c_val, ref.distmax);
+                
+                raise notice '  p_min, p_max = %, %', p_min, p_max;
+                
+                return query select * from data where data.id in (select index.id from index where index.val between p_min AND p_max);
+                
+            end if;
+            
+        end if;
+        i := i + 1;
+    end loop;
+
+
+END;
+$$ LANGUAGE plpgsql;
+
+
+------------------------------------------------
+
