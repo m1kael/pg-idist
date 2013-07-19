@@ -14,9 +14,9 @@ Quick Instructions
 5.  Load the following scripts:
     \i tables.sql
     \i functions.sql
-6.  Execute the following command:
+6.  Execute the following commands:
     select * from Test(); 
-
+    select * from SeeAll();
 
 Basics
 --------

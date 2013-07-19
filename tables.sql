@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS index (
 
 -- hide context messages which state where notice messages came from
 -- instead of DEFAULT or VERBOSE, use TERSE
--- must be it's own line to work in this script
+-- must be it's own line to work in this script (no comment on it)
 \set VERBOSITY 'terse'  
 
+-- add the btree index on the val column of the index
+-- (note: this is how we mimic idistance at the purely logical level)
+create index on index(val);
+
+-- now you should load functions.sql
