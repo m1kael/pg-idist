@@ -1,32 +1,34 @@
 
 -- drop entire schema, which will cascade through functions too
-DROP SCHEMA if exists idist CASCADE;
-CREATE SCHEMA idist;
+DROP SCHEMA if exists idist1 CASCADE;
+CREATE SCHEMA idist1;
 
---points only to our schema so we don't have to qualify everything with it
-SET search_path TO idist;
+-- points only to our schema so we don't have to qualify everything with it
+SET search_path TO idist1;
 
--- old: drop table if exists info, data, refs, index cascade;
-
+-- basic key-val store for misc info needed
 CREATE TABLE IF NOT EXISTS info (
     id  serial,
     key  varchar(255) unique,
     val  varchar(255)
 );
 
+-- the data records with all attributes as an array
 CREATE TABLE IF NOT EXISTS data (
     id  int,
     dims real[],
     pid int         -- partition id
 );
 
+-- the reference points in the dataspace for the index
 CREATE TABLE IF NOT EXISTS refs (
     id  int,
     dims  real[],
     distmax real,   -- distance of furthest assigned point
-    distmaxid int
+    distmaxid int 
 );
 
+-- the index itself (val) for each data record (by id)
 CREATE TABLE IF NOT EXISTS index (
     id  int,
     val real
@@ -40,6 +42,7 @@ CREATE TABLE IF NOT EXISTS index (
 
 -- add the btree index on the val column of the index
 -- (note: this is how we mimic idistance at the purely logical level)
+-- to get rid of it: "drop index index_val_idx"
 create index on index(val);
 
 -- now you should load functions.sql
